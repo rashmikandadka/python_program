@@ -1,0 +1,139 @@
+# app.py
+# app.py
+"""import os, uuid
+import numpy as np
+import tensorflow as tf
+from flask import Flask, render_template, request
+from werkzeug.utils import secure_filename
+from PIL import Image, ImageOps
+import cv2
+
+app = Flask(__name__)
+
+# ---------------- Model ----------------
+MODEL_PATH = "parkinson_model.keras"
+model = tf.keras.models.load_model(MODEL_PATH, compile=False)
+
+# ---------------- Upload folder ----------------
+UPLOAD_FOLDER = os.path.join("static", "uploads")
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
+
+# ---------------- Settings ----------------
+IMG_SIZE = (128, 128)     # must match training
+PRED_THRESHOLD = 0.50     # trained cutoff
+BORDERLINE_BAND = 0.04    # “unsure” zone
+
+# quick selfie detector (reject headshots)
+FACE = cv2.CascadeClassifier(
+    os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
+)
+
+# ---------------- Helpers ----------------
+def imread_bgr(path):
+    """Always read as 3-channel BGR (no alpha)."""
+    return cv2.imread(path, cv2.IMREAD_COLOR)
+
+def is_obviously_invalid(bgr):
+    """Reject non-spiral photos: selfies, books, nature, blank, noisy."""
+    if bgr is None:
+        return True
+    h, w = bgr.shape[:2]
+    if h * w == 0:
+        return True
+
+    # 1) reject selfies
+    try:
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        faces = FACE.detectMultiScale(gray, 1.1, 5, minSize=(80, 80))
+        if len(faces) > 0:
+            return True
+    except Exception:
+        pass
+
+    # 2) edge detection
+    g = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    g = cv2.GaussianBlur(g, (3, 3), 0)
+    edges = cv2.Canny(g, 40, 120)
+
+    ratio = (edges > 0).sum() / edges.size
+    if ratio < 0.0008 or ratio > 0.95:
+        return True
+
+    # 3) check if it looks like a spiral (circular + continuous)
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return True
+
+    # pick the largest contour
+    c = max(contours, key=cv2.contourArea)
+    area = cv2.contourArea(c)
+    perimeter = cv2.arcLength(c, True)
+
+    # circularity measure (close to circle/spiral)
+    if perimeter == 0:
+        return True
+    circularity = 4 * np.pi * (area / (perimeter * perimeter))
+
+    # spiral drawings usually have moderate circularity (not line-like, not full filled blob)
+    if circularity < 0.05 or circularity > 0.9:
+        return True
+
+    return False
+
+
+def prepare_rgb(path):
+    """Match training preprocessing: RGB -> resize -> normalize."""
+    img = Image.open(path).convert("RGB")
+    img = ImageOps.exif_transpose(img)  # handle phone rotation
+    img = img.resize(IMG_SIZE)
+    arr = np.array(img, dtype=np.float32) / 255.0
+    return np.expand_dims(arr, 0)
+
+# ---------------- Routes ----------------
+@app.route("/", methods=["GET"])
+def index():
+    return render_template("index.html")
+
+@app.route("/predict", methods=["POST"])
+def predict():
+    if "file" not in request.files:
+        return render_template("index.html", result="No file uploaded")
+
+    f = request.files["file"]
+    if not f or f.filename == "":
+        return render_template("index.html", result="No file selected")
+
+    base = secure_filename(f.filename)
+    name, ext = os.path.splitext(base)
+    fname = f"{name}_{uuid.uuid4().hex[:8]}{ext}"
+    save_path = os.path.join(app.config["UPLOAD_FOLDER"], fname)
+    f.save(save_path)
+
+    # 1. Validate
+    bgr = imread_bgr(save_path)
+    if is_obviously_invalid(bgr):
+        return render_template("index.html", result="⚠️ Please upload a valid spiral drawing!")
+
+    # 2. Predict
+    x = prepare_rgb(save_path)
+    prob = float(model.predict(x, verbose=0)[0][0])  # 1.0 = Parkinson, 0.0 = Healthy
+
+    # 3. Decision
+    low, high = PRED_THRESHOLD - BORDERLINE_BAND, PRED_THRESHOLD + BORDERLINE_BAND
+    if low <= prob <= high:
+        result = "ℹ️ Result borderline — try another sample."
+    elif prob >= PRED_THRESHOLD:
+        result = "⚠️ Person has Parkinson's Disease"
+    else:
+        result = "✅ Person is Healthy"
+
+    # Debug info in terminal
+    print({"prob": round(prob, 4), "thr": PRED_THRESHOLD})
+
+    return render_template("index.html", result=result)
+
+# ---------------- Main ----------------
+if __name__ == "__main__":
+    print(f"Model input: {model.input_shape}")
+    app.run(debug=True)"""

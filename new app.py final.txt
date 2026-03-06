@@ -1,0 +1,105 @@
+import streamlit as st
+import numpy as np
+import pandas as pd
+from tensorflow.keras.models import load_model
+from tensorflow.keras.preprocessing import image
+import matplotlib.pyplot as plt
+
+# Parameters
+IMG_SIZE = 224
+CLASS_NAMES = ["Healthy", "Non-Spiral", "Parkinson"]
+
+# Load model once
+@st.cache_resource
+def load_trained_model():
+    return load_model("artifacts/best_model.h5")
+
+model = load_trained_model()
+
+# Page Config
+st.set_page_config(
+    page_title="Parkinson Disease Detection Using Spiral Method",
+    page_icon="🌀",
+    layout="wide"
+)
+
+# Custom CSS
+st.markdown("""
+    <style>
+        /* Background */
+        .stApp {
+            background: linear-gradient(135deg, #ffe6f0, #fff5f9);
+        }
+        /* Centered content with max width */
+        .block-container {
+            max-width: 1000px;
+            margin: auto;
+        }
+        /* File uploader */
+        .stFileUploader { 
+            border: 2px dashed #4CAF50; 
+            padding: 10px; 
+            border-radius: 10px; 
+        }
+        /* Subtitle */
+        .subtitle { 
+            font-size: 28px; 
+            font-weight: bold; 
+            color: #b30047; 
+            text-align: center; 
+            margin-bottom: 20px; 
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+# Title
+st.title("🌀 Parkinson Disease Detection Using Spiral Method")
+
+# Subtitle
+st.markdown(
+    "<p class='subtitle'>Upload a spiral image and let the AI classify it into Healthy, Parkinson, or Non-Spiral.</p>",
+    unsafe_allow_html=True
+)
+
+# File uploader
+uploaded_file = st.file_uploader("📂 Upload Spiral Image", type=["jpg", "jpeg", "png"])
+
+if uploaded_file is not None:
+    # Layout
+    col1, col2 = st.columns([1, 2])
+
+    with col1:
+        st.image(uploaded_file, caption="Uploaded Spiral", use_column_width=True)
+
+    with col2:
+        # Preprocess
+        img = image.load_img(uploaded_file, target_size=(IMG_SIZE, IMG_SIZE))
+        img_array = image.img_to_array(img) / 255.0
+        img_array = np.expand_dims(img_array, axis=0)
+
+        # Prediction
+        preds = model.predict(img_array)
+        predicted_class = CLASS_NAMES[np.argmax(preds)]
+        confidence = np.max(preds)
+
+        # Show result (Bigger + Bold + Colored)
+        st.markdown(
+            f"""
+            <p style='font-size:32px; font-weight:bold; color:#d35400;'>
+                🧾 Prediction: {predicted_class} ✅ 
+                <br>
+                <span style='font-size:24px; color:#2c3e50;'>Confidence: {confidence:.2f}</span>
+            </p>
+            """,
+            unsafe_allow_html=True
+        )
+
+        # Probabilities chart with custom labels
+        st.write("### 🔎 Class Probabilities")
+        fig, ax = plt.subplots()
+        ax.bar(CLASS_NAMES, preds[0])
+        ax.set_ylabel("Probability", fontsize=14, fontweight="bold")
+        ax.set_ylim([0, 1])
+        ax.set_xticks(range(len(CLASS_NAMES)))
+        ax.set_xticklabels(CLASS_NAMES, fontsize=14, fontweight="bold", color="black")
+        st.pyplot(fig)

@@ -1,0 +1,281 @@
+"""import os
+import tensorflow as tf
+import numpy as np
+import cv2
+from flask import Flask, render_template, request   # <-- you forgot this import
+from werkzeug.utils import secure_filename
+from tensorflow.keras.preprocessing import image
+
+app = Flask(__name__)
+
+# Load trained model
+MODEL_PATH = "parkinson_model.keras"
+model = tf.keras.models.load_model(MODEL_PATH, compile=False)
+
+# Upload folder
+UPLOAD_FOLDER = "static/uploads"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
+
+
+# ---------------- Home Page ----------------
+@app.route("/", methods=["GET"])
+def index():
+    return render_template("index.html")
+
+
+# ---------------- Prediction ----------------
+@app.route("/predict", methods=["POST"])
+def predict():
+    if "file" not in request.files:
+        return render_template("index.html", result="No file uploaded")
+
+    file = request.files["file"]
+    if file.filename == "":
+        return render_template("index.html", result="No file selected")
+
+    filepath = os.path.join(app.config["UPLOAD_FOLDER"], secure_filename(file.filename))
+    file.save(filepath)
+
+    # ✅ Try to read the image safely
+    try:
+        img = image.load_img(filepath, target_size=(128, 128))
+    except Exception:
+        return render_template("index.html", result="⚠️ Please upload a valid spiral drawing!")
+
+    # ✅ Preprocess for model
+    img_array = image.img_to_array(img) / 255.0
+    img_array = np.expand_dims(img_array, axis=0)
+
+    prediction = model.predict(img_array)[0][0]
+
+    if prediction < 0.5:
+        result = "✅ Person is Healthy"
+        css_class = "healthy"
+    else:
+        result = "⚠️ Person has Parkinson's Disease"
+        css_class = "parkinson"
+
+    return render_template("index.html", result=result, css_class=css_class)
+
+    # Save uploaded file
+    filepath = os.path.join(app.config["UPLOAD_FOLDER"], secure_filename(file.filename))
+    file.save(filepath)
+
+    # ✅ Validate if it's a spiral (not selfie/book/nature/notes)
+    img = cv2.imread(filepath, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return render_template("index.html", result="⚠️ Invalid image format")
+
+    # Resize for analysis
+    h, w = img.shape
+    aspect_ratio = w / h
+
+    edges = cv2.Canny(img, 50, 150)
+    edge_ratio = np.sum(edges > 0) / edges.size
+
+    # Find contours
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    num_contours = len(contours)
+
+    # ✅ Spiral-like check: roughly square, moderate edges, few contours
+    # ✅ Spiral-like check: roughly square, enough edges, not too noisy
+    if not (0.6 < aspect_ratio < 1.4 and 0.005 < edge_ratio < 0.35 and num_contours < 30):
+        return render_template("index.html", uploaded_image=filepath,
+                               result="⚠️ Please upload a valid spiral drawing!")
+
+
+    # ✅ Preprocess for model
+    img = image.load_img(filepath, target_size=(128, 128))
+    img_array = image.img_to_array(img) / 255.0
+    img_array = np.expand_dims(img_array, axis=0)
+
+    prediction = model.predict(img_array)[0][0]
+
+    if prediction < 0.5:
+        result = "✅ Person is Healthy"
+    else:
+        result = "⚠️ Person has Parkinson's Disease"
+
+    return render_template("index.html", uploaded_image=filepath, result=result)
+
+
+# ---------------- Main ----------------
+if __name__ == "__main__":
+    app.run(debug=True)"""
+# app.py
+"""import os
+import uuid
+import numpy as np
+import tensorflow as tf
+from flask import Flask, render_template, request
+from werkzeug.utils import secure_filename
+from PIL import Image, ImageOps
+import cv2
+
+# ---------------- App & paths ----------------
+app = Flask(__name__)
+
+MODEL_PATH = "parkinson_model.keras"        # your trained model
+model = tf.keras.models.load_model(MODEL_PATH, compile=False)
+
+UPLOAD_FOLDER = os.path.join("static", "uploads")
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
+
+# ---------------- Tunables ------------------
+IMG_SIZE = (128, 128)       # must match training
+PRED_THRESHOLD = 0.60       # ↑ a bit to reduce false positives (1.0 = very strict)
+BORDERLINE_BAND = 0.05      # say “unsure” when prob is close to threshold
+
+# quick selfie detector (reject headshots)
+FACE_CASCADE = cv2.CascadeClassifier(
+    os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
+)
+
+# --------------- Helpers --------------------
+def _cv_imread_any(path):
+    """Read any PNG/JPG (with or without alpha) into BGR for OpenCV."""
+    im = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if im is None:
+        return None
+    if im.ndim == 3 and im.shape[2] == 4:  # flatten RGBA on white
+        b, g, r, a = cv2.split(im)
+        a = a.astype(np.float32) / 255.0
+        white = np.full_like(b, 255)
+        b = (b * a + white * (1 - a)).astype(np.uint8)
+        g = (g * a + white * (1 - a)).astype(np.uint8)
+        r = (r * a + white * (1 - a)).astype(np.uint8)
+        im = cv2.merge([b, g, r])
+    if im.ndim == 2:
+        im = cv2.cvtColor(im, cv2.COLOR_GRAY2BGR)
+    return im
+
+def assess_spiral(image_bgr):
+    """
+    Decide whether the upload looks like a *drawing* of a spiral.
+    Returns one of: 'valid' | 'invalid' | 'unsure'
+    (lenient enough not to reject your dataset spirals)
+    """
+    h, w = image_bgr.shape[:2]
+
+    # reject obvious selfies quickly
+    try:
+        gray_face = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        faces = FACE_CASCADE.detectMultiScale(gray_face, 1.15, 5, minSize=(64, 64))
+        if len(faces) > 0:
+            return "invalid"   # selfie/photo -> not a spiral drawing
+    except Exception:
+        pass
+
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    gray = cv2.equalizeHist(gray)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+
+    edges = cv2.Canny(gray, 35, 110)
+    edge_ratio = float((edges > 0).sum()) / edges.size
+
+    # too few or too many edges → not a clean drawing
+    if edge_ratio < 0.0015 or edge_ratio > 0.85:
+        return "invalid"
+
+    # component count: printed pages/nature usually have lots of small blobs
+    num_labels, _ = cv2.connectedComponents((edges > 0).astype(np.uint8))
+    components = num_labels - 1
+    if components >= 260:        # tighten if you still see text/nature getting through
+        return "invalid"
+
+    # largest contour stats
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return "invalid"
+    c = max(contours, key=cv2.contourArea)
+    area = cv2.contourArea(c)
+    largest_area = area / float(w * h)
+
+    hull = cv2.convexHull(c)
+    hull_area = max(1.0, cv2.contourArea(hull))
+    solidity = area / hull_area
+
+    # spiral-ish drawings occupy some area and are fairly solid
+    if largest_area >= 0.004 and 0.15 <= solidity <= 1.0 and 0.003 <= edge_ratio <= 0.65:
+        return "valid"
+
+    # otherwise let model decide
+    return "unsure"
+
+def prepare_for_model(path):
+    """Match the notebook preprocessing: grayscale 'L' -> 128x128 -> /255.0.
+       If the model expects 3 channels, replicate the channel."""
+    img = Image.open(path).convert("L")
+    img = ImageOps.exif_transpose(img)   # respect phone EXIF rotations
+    img = img.resize(IMG_SIZE)
+    arr = np.array(img, dtype=np.float32) / 255.0        # (H, W)
+    arr = np.expand_dims(arr, -1)                        # (H, W, 1)
+
+    in_ch = int(model.input_shape[-1])                   # 1 or 3 typically
+    if in_ch == 3:
+        arr = np.repeat(arr, 3, axis=-1)                 # (H, W, 3)
+    # if your model is channel-first, Keras will still accept NHWC in TF backend
+
+    return np.expand_dims(arr, 0)                        # (1, H, W, C)
+
+# --------------- Routes ---------------------
+@app.route("/", methods=["GET"])
+def index():
+    return render_template("index.html")
+
+@app.route("/predict", methods=["POST"])
+def predict():
+    if "file" not in request.files:
+        return render_template("index.html", result="No file uploaded")
+
+    f = request.files["file"]
+    if not f or f.filename == "":
+        return render_template("index.html", result="No file selected")
+
+    # save with a random suffix so the browser doesn’t cache old files
+    base = secure_filename(f.filename)
+    name, ext = os.path.splitext(base)
+    fname = f"{name}_{uuid.uuid4().hex[:8]}{ext}"
+    save_path = os.path.join(app.config["UPLOAD_FOLDER"], fname)
+    f.save(save_path)
+
+    # 1) validate the content
+    bgr = _cv_imread_any(save_path)
+    if bgr is None:
+        return render_template("index.html", result="File could not be read")
+
+    decision = assess_spiral(bgr)
+    if decision == "invalid":
+        return render_template("index.html", result="⚠️ Please upload a valid spiral drawing!")
+
+    # 2) run the model (for 'valid' or 'unsure')
+    x = prepare_for_model(save_path)
+    prob = float(model.predict(x, verbose=0)[0][0])   # 1.0 = Parkinson, 0.0 = Healthy
+
+    # 3) decide label with a small “unsure” band around the threshold
+    low = PRED_THRESHOLD - BORDERLINE_BAND
+    high = PRED_THRESHOLD + BORDERLINE_BAND
+
+    if low <= prob <= high:
+        result_text = "ℹ️ Not sure — result is borderline. Try another sample."
+    elif prob >= PRED_THRESHOLD:
+        result_text = "⚠️ Person has Parkinson's Disease"
+    else:
+        result_text = "✅ Person is Healthy"
+
+    # print some debug info to your terminal to understand behavior
+    print({
+        "validator": decision,
+        "prob": round(prob, 4),
+        "threshold": PRED_THRESHOLD,
+    })
+
+    return render_template("index.html", result=result_text)
+
+# --------------- Main -----------------------
+if __name__ == "__main__":
+    print(f"Model input shape: {model.input_shape}")
+    app.run(debug=True)
+    """

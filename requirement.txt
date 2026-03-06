@@ -1,0 +1,26 @@
+# Core Dependencies (Existing)
+Flask==2.3.0
+tensorflow==2.13.0
+keras==2.13.0
+numpy==1.24.3
+opencv-python==4.8.0.74
+Pillow==10.0.0
+werkzeug==2.3.0
+
+# NEW Dependencies for Voice Analysis
+librosa==0.10.1          # Audio feature extraction
+soundfile==0.12.1        # Audio file I/O (required by librosa)
+praat-parselmouth==0.4.3 # Jitter, shimmer, HNR extraction
+scikit-learn==1.3.0      # ML algorithms (Random Forest, SVM)
+joblib==1.3.2            # Model persistence
+pandas==2.0.3            # Data handling
+
+# Optional but Recommended
+matplotlib==3.7.2        # Visualization
+seaborn==0.12.2          # Statistical plots
+audioread==3.0.0         # Additional audio format support
+pydub==0.25.1            # Audio conversion (if needed)
+
+# For Audio Recording in Web Interface (Optional)
+# These are JavaScript libraries, not Python
+# - Use RecordRTC or MediaRecorder API in frontend

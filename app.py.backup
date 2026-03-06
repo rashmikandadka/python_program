@@ -1,0 +1,460 @@
+from flask import Flask, render_template, request, jsonify
+from werkzeug.utils import secure_filename
+import os
+import numpy as np
+from predict import predict_result
+
+# Import the voice predictor
+try:
+    from simple_voice_predictor import SimpleVoicePredictor, get_recording_instructions
+    voice_predictor = SimpleVoicePredictor()
+    VOICE_MODEL_AVAILABLE = True
+    print("✅ Voice Predictor loaded successfully")
+except Exception as e:
+    print(f"❌ Voice analysis not available: {e}")
+    import traceback
+    traceback.print_exc()
+    VOICE_MODEL_AVAILABLE = False
+
+app = Flask(__name__)
+
+# Folders
+UPLOAD_FOLDER = 'static/uploads'
+VOICE_FOLDER = 'static/voice_uploads'
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(VOICE_FOLDER, exist_ok=True)
+
+# Allowed extensions
+ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'bmp'}
+ALLOWED_AUDIO_EXTENSIONS = {'wav', 'mp3', 'ogg', 'webm', 'm4a', 'mp4', 'mpeg', 'flac'}
+
+
+def allowed_file(filename, file_type='image'):
+    """Check if file extension is allowed"""
+    if file_type == 'image':
+        return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_IMAGE_EXTENSIONS
+    elif file_type == 'audio':
+        return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_AUDIO_EXTENSIONS
+    return False
+
+
+def convert_to_wav(audio_path):
+    """
+    ULTRA-LENIENT audio conversion - accepts almost any audio
+    """
+    try:
+        print(f"\n{'='*60}")
+        print(f"[AUDIO CONVERSION - LENIENT MODE]")
+        print(f"Input: {audio_path}")
+        print(f"Size: {os.path.getsize(audio_path):,} bytes")
+        
+        import librosa
+        import soundfile as sf
+        
+        # Check if already WAV - try to use it directly
+        if audio_path.lower().endswith('.wav'):
+            try:
+                y, sr = librosa.load(audio_path, sr=22050, duration=0.5)
+                if len(y) > 0:
+                    print(f"✅ Valid WAV file, using directly")
+                    print(f"{'='*60}\n")
+                    return audio_path
+            except:
+                print(f"⚠️ WAV needs conversion")
+        
+        # Load audio - try multiple methods
+        print(f"🔄 Loading audio...")
+        try:
+            y, sr = librosa.load(audio_path, sr=22050, mono=True)
+        except Exception as e1:
+            print(f"  Method 1 failed: {e1}")
+            try:
+                # Try with different parameters
+                y, sr = librosa.load(audio_path, sr=None, mono=True)
+                # Resample to 22050 if needed
+                if sr != 22050:
+                    y = librosa.resample(y, orig_sr=sr, target_sr=22050)
+                    sr = 22050
+            except Exception as e2:
+                print(f"  Method 2 failed: {e2}")
+                print(f"❌ Could not load audio file")
+                print(f"{'='*60}\n")
+                return None
+        
+        print(f"  ✅ Loaded: {len(y)} samples at {sr}Hz")
+        print(f"  Duration: {len(y)/sr:.2f} seconds")
+        
+        # Very lenient minimum duration check
+        if len(y) < sr * 0.2:  # Only 0.2 seconds minimum!
+            print(f"❌ Audio too short: {len(y)/sr:.2f}s (minimum 0.2s)")
+            print(f"{'='*60}\n")
+            return None
+        
+        # Check if audio has any signal
+        max_amplitude = np.max(np.abs(y))
+        print(f"  Max amplitude: {max_amplitude:.4f}")
+        
+        if max_amplitude < 0.001:
+            print(f"❌ Audio is silent or too quiet")
+            print(f"{'='*60}\n")
+            return None
+        
+        # VERY LENIENT trimming - keep almost everything
+        try:
+            y_trimmed, _ = librosa.effects.trim(y, top_db=30)  # Very lenient
+            print(f"  After trim: {len(y_trimmed)} samples ({len(y_trimmed)/sr:.2f}s)")
+        except:
+            y_trimmed = y
+            print(f"  Skipping trim, using original")
+        
+        # If trimming removed too much, use original
+        if len(y_trimmed) < len(y) * 0.3:  # Lost more than 70%
+            print(f"  ⚠️ Trimming too aggressive, using original")
+            y_trimmed = y
+        
+        # Normalize volume
+        try:
+            y_normalized = librosa.util.normalize(y_trimmed)
+        except:
+            y_normalized = y_trimmed / np.max(np.abs(y_trimmed))
+        
+        # Save as WAV
+        wav_path = audio_path.rsplit('.', 1)[0] + '_converted.wav'
+        sf.write(wav_path, y_normalized, sr)
+        
+        # Verify output
+        if os.path.exists(wav_path) and os.path.getsize(wav_path) > 500:
+            print(f"✅ Conversion successful: {wav_path}")
+            print(f"  Output size: {os.path.getsize(wav_path):,} bytes")
+            print(f"{'='*60}\n")
+            return wav_path
+        else:
+            print(f"❌ Output file invalid")
+            print(f"{'='*60}\n")
+            return None
+        
+    except Exception as e:
+        print(f"❌ CONVERSION ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        print(f"{'='*60}\n")
+        return None
+
+
+@app.route('/')
+def index():
+    """Home page"""
+    instructions = get_recording_instructions() if VOICE_MODEL_AVAILABLE else None
+    return render_template('index_combined.html', 
+                         voice_available=VOICE_MODEL_AVAILABLE,
+                         recording_instructions=instructions,
+                         spiral_msg=None,
+                         voice_msg=None,
+                         combined_msg=None)
+
+
+@app.route('/predict_spiral', methods=['POST'])
+def predict_spiral():
+    """Handle spiral prediction"""
+    if 'file' not in request.files:
+        return render_template('index_combined.html', 
+                             spiral_msg='No file selected',
+                             voice_available=VOICE_MODEL_AVAILABLE,
+                             recording_instructions=get_recording_instructions() if VOICE_MODEL_AVAILABLE else None)
+    
+    file = request.files['file']
+    if file.filename == '' or not allowed_file(file.filename, 'image'):
+        return render_template('index_combined.html', 
+                             spiral_msg='Please upload a valid image file',
+                             voice_available=VOICE_MODEL_AVAILABLE,
+                             recording_instructions=get_recording_instructions() if VOICE_MODEL_AVAILABLE else None)
+    
+    # Save file
+    filename = secure_filename(file.filename)
+    upload_path = os.path.join(UPLOAD_FOLDER, filename)
+    file.save(upload_path)
+    
+    # Get prediction
+    result, confidence, treatment_suggestions = predict_result(upload_path)
+    
+    return render_template('result_combined.html',
+                         test_type='Spiral Drawing',
+                         result=result,
+                         confidence=confidence,
+                         filename=filename,
+                         treatment_suggestions=treatment_suggestions,
+                         analysis=None,
+                         voice_available=VOICE_MODEL_AVAILABLE)
+
+
+@app.route('/predict_voice', methods=['POST'])
+def predict_voice():
+    """
+    Handle voice prediction - SUPER ROBUST VERSION
+    """
+    if not VOICE_MODEL_AVAILABLE:
+        return render_template('index_combined.html',
+                             voice_msg='Voice analysis not available',
+                             voice_available=False,
+                             recording_instructions=None,
+                             spiral_msg=None,
+                             combined_msg=None)
+    
+    if 'voice_file' not in request.files:
+        return render_template('index_combined.html',
+                             voice_msg='No audio file selected',
+                             voice_available=VOICE_MODEL_AVAILABLE,
+                             recording_instructions=get_recording_instructions(),
+                             spiral_msg=None,
+                             combined_msg=None)
+    
+    file = request.files['voice_file']
+    
+    if not file or file.filename == '':
+        return render_template('index_combined.html',
+                             voice_msg='No file selected. Please record or upload audio.',
+                             voice_available=VOICE_MODEL_AVAILABLE,
+                             recording_instructions=get_recording_instructions(),
+                             spiral_msg=None,
+                             combined_msg=None)
+    
+    if not allowed_file(file.filename, 'audio'):
+        return render_template('index_combined.html',
+                             voice_msg=f'Invalid file type. Please upload audio file.',
+                             voice_available=VOICE_MODEL_AVAILABLE,
+                             recording_instructions=get_recording_instructions(),
+                             spiral_msg=None,
+                             combined_msg=None)
+    
+    # Check file size
+    file.seek(0, 2)
+    file_size = file.tell()
+    file.seek(0)
+    
+    print(f"\n{'='*60}")
+    print(f"VOICE FILE UPLOAD")
+    print(f"Filename: {file.filename}")
+    print(f"Size: {file_size:,} bytes ({file_size/1024:.2f} KB)")
+    print(f"{'='*60}\n")
+    
+    if file_size < 500:  # Very lenient - only 500 bytes minimum
+        return render_template('index_combined.html',
+                             voice_msg=f'Audio file too small ({file_size} bytes). Please record for at least 1 second.',
+                             voice_available=VOICE_MODEL_AVAILABLE,
+                             recording_instructions=get_recording_instructions(),
+                             spiral_msg=None,
+                             combined_msg=None)
+    
+    # Save file
+    filename = secure_filename(file.filename)
+    upload_path = os.path.join(VOICE_FOLDER, filename)
+    
+    try:
+        file.save(upload_path)
+        print(f"✅ File saved: {upload_path}")
+    except Exception as e:
+        print(f"❌ Save error: {e}")
+        return render_template('index_combined.html',
+                             voice_msg=f'Error saving file. Please try again.',
+                             voice_available=VOICE_MODEL_AVAILABLE,
+                             recording_instructions=get_recording_instructions(),
+                             spiral_msg=None,
+                             combined_msg=None)
+    
+    # Verify file exists
+    if not os.path.exists(upload_path) or os.path.getsize(upload_path) == 0:
+        return render_template('index_combined.html',
+                             voice_msg='File save verification failed. Please try again.',
+                             voice_available=VOICE_MODEL_AVAILABLE,
+                             recording_instructions=get_recording_instructions(),
+                             spiral_msg=None,
+                             combined_msg=None)
+    
+    # Convert to WAV
+    print(f"🔄 Starting audio conversion...")
+    wav_path = convert_to_wav(upload_path)
+    
+    if wav_path is None:
+        print(f"❌ Audio conversion failed")
+        if os.path.exists(upload_path):
+            os.remove(upload_path)
+        return render_template('index_combined.html',
+                             voice_msg='⚠️ Could not process audio. Tips: 1) Record for 2-5 seconds, 2) Speak clearly, 3) Ensure microphone works, 4) Try uploading a different audio file',
+                             voice_available=VOICE_MODEL_AVAILABLE,
+                             recording_instructions=get_recording_instructions(),
+                             spiral_msg=None,
+                             combined_msg=None)
+    
+    print(f"✅ Audio ready for analysis: {wav_path}")
+    
+    # Get prediction
+    try:
+        print(f"🔬 Starting voice analysis...")
+        result, confidence, analysis = voice_predictor.predict(wav_path)
+        
+        print(f"✅ Analysis complete!")
+        print(f"   Result: {result}")
+        print(f"   Confidence: {confidence}%")
+        
+    except Exception as e:
+        print(f"❌ PREDICTION ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # Clean up
+        if os.path.exists(upload_path):
+            os.remove(upload_path)
+        if wav_path != upload_path and os.path.exists(wav_path):
+            os.remove(wav_path)
+        
+        return render_template('index_combined.html',
+                             voice_msg='⚠️ Error during analysis. Please try again.',
+                             voice_available=VOICE_MODEL_AVAILABLE,
+                             recording_instructions=get_recording_instructions(),
+                             spiral_msg=None,
+                             combined_msg=None)
+    
+    # Get treatment suggestions only for clear positive cases
+    treatment_suggestions = None
+    if ("Parkinson" in result and "⚠️" in result and 
+        "borderline" not in result.lower() and 
+        "concerning" not in result.lower() and
+        "insufficient" not in result.lower()):
+        from predict import get_treatment_suggestions
+        treatment_suggestions = get_treatment_suggestions()
+    
+    # Clean up temporary files
+    if wav_path != upload_path and os.path.exists(wav_path):
+        try:
+            os.remove(wav_path)
+            print(f"🗑️ Cleaned up temporary file")
+        except:
+            pass
+    
+    return render_template('result_combined.html',
+                         test_type='Voice Analysis',
+                         result=result,
+                         confidence=confidence,
+                         filename=filename,
+                         treatment_suggestions=treatment_suggestions,
+                         analysis=analysis,
+                         voice_available=VOICE_MODEL_AVAILABLE)
+
+
+@app.route('/predict_combined', methods=['POST'])
+def predict_combined():
+    """Handle combined spiral + voice prediction"""
+    if not VOICE_MODEL_AVAILABLE:
+        return jsonify({'error': 'Voice analysis not available'})
+    
+    spiral_file = request.files.get('spiral_file')
+    voice_file = request.files.get('voice_file_combined')
+    
+    if not spiral_file or not voice_file:
+        return render_template('index_combined.html',
+                             combined_msg='Please upload both files',
+                             voice_available=VOICE_MODEL_AVAILABLE,
+                             recording_instructions=get_recording_instructions(),
+                             spiral_msg=None,
+                             voice_msg=None)
+    
+    # Validate
+    if not allowed_file(spiral_file.filename, 'image'):
+        return render_template('index_combined.html',
+                             combined_msg='Invalid image file',
+                             voice_available=VOICE_MODEL_AVAILABLE,
+                             recording_instructions=get_recording_instructions(),
+                             spiral_msg=None,
+                             voice_msg=None)
+    
+    if not allowed_file(voice_file.filename, 'audio'):
+        return render_template('index_combined.html',
+                             combined_msg='Invalid audio file',
+                             voice_available=VOICE_MODEL_AVAILABLE,
+                             recording_instructions=get_recording_instructions(),
+                             spiral_msg=None,
+                             voice_msg=None)
+    
+    # Save files
+    spiral_filename = secure_filename(spiral_file.filename)
+    spiral_path = os.path.join(UPLOAD_FOLDER, spiral_filename)
+    spiral_file.save(spiral_path)
+    
+    voice_filename = secure_filename(voice_file.filename)
+    voice_path = os.path.join(VOICE_FOLDER, voice_filename)
+    voice_file.save(voice_path)
+    
+    # Convert voice
+    wav_path = convert_to_wav(voice_path)
+    
+    if wav_path is None:
+        return render_template('index_combined.html',
+                             combined_msg='⚠️ Voice processing failed. Please ensure good recording.',
+                             voice_available=VOICE_MODEL_AVAILABLE,
+                             recording_instructions=get_recording_instructions(),
+                             spiral_msg=None,
+                             voice_msg=None)
+    
+    # Get predictions
+    spiral_result, spiral_conf, spiral_treatment = predict_result(spiral_path)
+    voice_result, voice_conf, voice_analysis = voice_predictor.predict(wav_path)
+    
+    # Combined decision
+    spiral_positive = "Parkinson" in spiral_result and "⚠️" in spiral_result
+    voice_positive = "Parkinson" in voice_result and "⚠️" in voice_result
+    
+    if spiral_positive and voice_positive:
+        combined_result = "⚠️ BOTH tests indicate Parkinson's Disease"
+        combined_confidence = (spiral_conf + voice_conf) / 2
+        recommendation = "Strong indication - Consult neurologist"
+    elif spiral_positive or voice_positive:
+        combined_result = "⚠️ ONE test indicates possible concern"
+        combined_confidence = max(spiral_conf, voice_conf)
+        recommendation = "Mixed results - Medical evaluation recommended"
+    else:
+        combined_result = "✅ BOTH tests indicate Healthy"
+        combined_confidence = (spiral_conf + voice_conf) / 2
+        recommendation = "Both assessments normal"
+    
+    # Treatment suggestions
+    treatment_suggestions = None
+    if spiral_positive or voice_positive:
+        from predict import get_treatment_suggestions
+        treatment_suggestions = get_treatment_suggestions()
+    
+    # Clean up
+    if wav_path != voice_path and os.path.exists(wav_path):
+        try:
+            os.remove(wav_path)
+        except:
+            pass
+    
+    return render_template('result_combined_both.html',
+                         spiral_result=spiral_result,
+                         spiral_confidence=spiral_conf,
+                         voice_result=voice_result,
+                         voice_confidence=voice_conf,
+                         combined_result=combined_result,
+                         combined_confidence=combined_confidence,
+                         recommendation=recommendation,
+                         treatment_suggestions=treatment_suggestions,
+                         voice_analysis=voice_analysis,
+                         spiral_filename=spiral_filename,
+                         voice_filename=voice_filename)
+
+
+if __name__ == '__main__':
+    print("="*60)
+    print("Parkinson's Detection - ULTRA-ROBUST VERSION")
+    print("="*60)
+    print("✅ Spiral Drawing: Available")
+    print(f"{'✅' if VOICE_MODEL_AVAILABLE else '❌'} Voice Analysis: {'Available (Ultra-Lenient)' if VOICE_MODEL_AVAILABLE else 'Not Available'}")
+    print("="*60)
+    print("\n🔧 Features:")
+    print("  • Ultra-lenient audio processing")
+    print("  • Accepts 0.2s minimum audio")
+    print("  • Better error messages")
+    print("  • Robust file handling")
+    print("="*60)
+    
+    app.run(debug=True, port=5000)
