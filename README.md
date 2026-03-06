@@ -25,3 +25,10 @@ This repository contains beginner Python practice programs and data analysis exe
 - NumPy
 - Pandas
 - Jupyter Notebook
+- ## Machine Learning Projects
+
+### Iris Classification
+Basic classification model using Scikit-learn.
+
+### Parkinson Disease Detection
+Voice-based Parkinson detection using audio feature extraction and machine learning.
