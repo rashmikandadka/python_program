@@ -1,19 +1,25 @@
-# Parkinson Disease Detection using Voice Analysis
+# Parkinson’s Disease Detection using ML
 
-This project predicts Parkinson's disease using voice features and machine learning.
+## Overview
+This project detects Parkinson’s disease using spiral drawings, handwritten patterns, and voice data.
 
 ## Features
-- Voice feature extraction using Librosa
-- Machine learning prediction
-- Audio analysis
+- Multimodal data processing (image + voice)
+- Machine Learning model for prediction
+- Data preprocessing and feature extraction
 
-## Technologies
-Python  
-Librosa  
-Scikit-learn  
-Pandas  
+## Tech Stack
+- Python
+- Machine Learning (Scikit-learn)
+- OpenCV / NumPy / Pandas
 
-## Files
-- train_voice_model.py – model training
-- predict_voice.py – prediction script
-- audio_features.py – feature extraction
+## Challenges
+- Handling heterogeneous data (image + audio)
+- Improving model accuracy
+
+## Results
+Achieved good prediction accuracy and successfully classified patients.
+
+## Future Improvements
+- Use deep learning models
+- Improve dataset size and accuracy
